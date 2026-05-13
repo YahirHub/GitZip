@@ -1,0 +1,18 @@
+# Binarios y pruebas
+/gitzip
+/gitzip.exe
+*.test
+*.out
+
+# Archivos empaquetados
+*.zip
+
+# Entornos de editor / SO
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build local
+/bin/
+/dist/
