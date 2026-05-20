@@ -57,6 +57,19 @@ func TestUploadWithProvidersRejectsMissingArchiveBeforeFallback(t *testing.T) {
 	}
 }
 
+func TestDefaultProvidersUseDirectDownloadCandidatesOnly(t *testing.T) {
+	providers := defaultProviders()
+	got := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		got = append(got, provider.Name())
+	}
+
+	want := []string{"Litterbox", "Uguu", "transfer.sh", "0x0.st"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("proveedores inesperados: %v; se esperaba %v", got, want)
+	}
+}
+
 func TestPlainMultipartProviderUploadsFileAndParsesURL(t *testing.T) {
 	archivePath := mustArchive(t)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -93,24 +106,76 @@ func TestPlainMultipartProviderUploadsFileAndParsesURL(t *testing.T) {
 	}
 }
 
-func TestFileIOProviderParsesJSONResponse(t *testing.T) {
+func TestUguuProviderParsesDirectURL(t *testing.T) {
 	archivePath := mustArchive(t)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if !strings.HasPrefix(request.Header.Get("Content-Type"), "multipart/form-data") {
-			http.Error(writer, "content type inválido", http.StatusBadRequest)
+		if err := request.ParseMultipartForm(4 << 20); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
 			return
 		}
+		file, _, err := request.FormFile("files[]")
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = file.Close()
 		writer.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(writer, `{"success":true,"link":"https://file.io/mock"}`)
+		fmt.Fprint(writer, `{"success":true,"files":[{"url":"https://h.uguu.se/mock.zip"}]}`)
 	}))
 	defer server.Close()
 
-	provider := &fileIOProvider{endpoint: server.URL}
+	provider := &uguuProvider{endpoint: server.URL}
 	result, err := provider.Upload(context.Background(), server.Client(), archivePath)
 	if err != nil {
-		t.Fatalf("fileIOProvider devolvió error: %v", err)
+		t.Fatalf("uguuProvider devolvió error: %v", err)
 	}
-	if result != "https://file.io/mock" {
+	if result != "https://h.uguu.se/mock.zip" {
+		t.Fatalf("URL inesperada: %s", result)
+	}
+}
+
+func TestTransferSHProviderUsesPutAndReturnsGetAlias(t *testing.T) {
+	archivePath := mustArchive(t)
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut {
+			http.Error(writer, "método inválido", http.StatusMethodNotAllowed)
+			return
+		}
+		if request.Header.Get("Max-Days") != "1" {
+			http.Error(writer, "Max-Days faltante", http.StatusBadRequest)
+			return
+		}
+		payload, err := io.ReadAll(request.Body)
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if string(payload) != "zip-data" {
+			http.Error(writer, "payload inesperado", http.StatusBadRequest)
+			return
+		}
+		fmt.Fprintf(writer, "%s/1lDau/proyecto.zip", server.URL)
+	}))
+	defer server.Close()
+
+	provider := &transferSHProvider{endpoint: server.URL, maxDays: "1"}
+	result, err := provider.Upload(context.Background(), server.Client(), archivePath)
+	if err != nil {
+		t.Fatalf("transferSHProvider devolvió error: %v", err)
+	}
+	want := server.URL + "/get/1lDau/proyecto.zip"
+	if result != want {
+		t.Fatalf("URL inesperada: %s; se esperaba %s", result, want)
+	}
+}
+
+func TestTransferDirectURLPreservesAlreadyDirectPath(t *testing.T) {
+	result, err := transferDirectURL("https://transfer.sh/get/1lDau/proyecto.zip")
+	if err != nil {
+		t.Fatalf("transferDirectURL devolvió error: %v", err)
+	}
+	if result != "https://transfer.sh/get/1lDau/proyecto.zip" {
 		t.Fatalf("URL inesperada: %s", result)
 	}
 }

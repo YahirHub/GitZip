@@ -70,15 +70,14 @@ Este modo:
 1. Comprime el proyecto actual.
 2. Genera una contraseña aleatoria.
 3. Protege el ZIP con cifrado ZIP estándar compatible con `unzip -P`.
-4. Intenta subirlo, en orden, a:
-   - `temp.sh`
+4. Intenta subirlo, en orden, a proveedores que entregan o permiten construir una URL de descarga directa compatible con `wget`:
    - `Litterbox`
-   - `file.io`
-   - `tmpfiles.org`
+   - `Uguu`
+   - `transfer.sh`
    - `0x0.st`
 5. Si un proveedor falla, prueba el siguiente.
 6. Si la subida termina bien, imprime:
-   - enlace de descarga,
+   - enlace directo de descarga,
    - contraseña,
    - comando `wget`,
    - comando `unzip -P`.
@@ -86,21 +85,26 @@ Este modo:
 Ejemplo de salida:
 
 ```text
-Subida temporal completada con: temp.sh
-Enlace: https://temp.sh/abc123/mi-panel.zip
+Subida temporal completada con: transfer.sh
+Enlace directo: https://transfer.sh/get/abc123/mi-panel.zip
 Contraseña ZIP: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 Comando wget:
-wget -O 'mi-panel.zip' 'https://temp.sh/abc123/mi-panel.zip'
+wget -O 'mi-panel.zip' 'https://transfer.sh/get/abc123/mi-panel.zip'
 Comando unzip:
 unzip -P 'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX' 'mi-panel.zip'
 ```
 
 > Nota: el modo `upload` usa cifrado ZIP estándar para mantener compatibilidad directa con `unzip -P`. Es útil para intercambio temporal, pero no debe tratarse como cifrado moderno de alta seguridad.
 
+### Enlaces directos del modo `upload`
+
+El comando ya no usa hosts que puedan responder con una página HTML de aterrizaje en lugar del archivo. La URL que imprime está pensada para que el `wget -O ...` descargue el ZIP, no una página web. En `transfer.sh`, por ejemplo, se transforma el enlace compartible al alias directo `/get/...` antes de mostrarlo.
+
+
 ## Salida esperada
 
 ```text
-gitzip v0.2.0
+gitzip v0.2.1
 Proyecto: mi-panel
 Salida:   C:\Proyectos\mi-panel\mi-panel.zip
 Escaneando archivos respetando .gitignore...

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -29,13 +30,14 @@ type Attempt struct {
 	Err      error
 }
 
-// Provider uploads a local archive and returns a download URL.
+// Provider uploads a local archive and returns a direct download URL.
 type Provider interface {
 	Name() string
 	Upload(ctx context.Context, client *http.Client, archivePath string) (string, error)
 }
 
-// Upload tries documented temporary-upload providers in order until one works.
+// Upload tries temporary-upload providers that are expected to return, or can be
+// converted into, direct download links compatible with the printed wget command.
 func Upload(ctx context.Context, archivePath string) (Result, []Attempt, error) {
 	client := &http.Client{Timeout: 15 * time.Minute}
 	return uploadWithProviders(ctx, client, archivePath, defaultProviders())
@@ -87,11 +89,6 @@ func uploadWithProviders(ctx context.Context, client *http.Client, archivePath s
 func defaultProviders() []Provider {
 	return []Provider{
 		&plainMultipartProvider{
-			name:      "temp.sh",
-			endpoint:  "https://temp.sh/upload",
-			fileField: "file",
-		},
-		&plainMultipartProvider{
 			name:      "Litterbox",
 			endpoint:  "https://litterbox.catbox.moe/resources/internals/api.php",
 			fileField: "fileToUpload",
@@ -100,8 +97,8 @@ func defaultProviders() []Provider {
 				"time":    "72h",
 			},
 		},
-		&fileIOProvider{endpoint: "https://file.io/?expires=1w"},
-		&tmpFilesProvider{endpoint: "https://tmpfiles.org/api/v1/upload"},
+		&uguuProvider{endpoint: "https://uguu.se/upload?output=json"},
+		&transferSHProvider{endpoint: "https://transfer.sh", maxDays: "1"},
 		&plainMultipartProvider{
 			name:      "0x0.st",
 			endpoint:  "https://0x0.st",
@@ -129,69 +126,75 @@ func (p *plainMultipartProvider) Upload(ctx context.Context, client *http.Client
 	return parsePlainURL(payload)
 }
 
-type fileIOProvider struct {
+type uguuProvider struct {
 	endpoint string
 }
 
-func (p *fileIOProvider) Name() string {
-	return "file.io"
+func (p *uguuProvider) Name() string {
+	return "Uguu"
 }
 
-func (p *fileIOProvider) Upload(ctx context.Context, client *http.Client, archivePath string) (string, error) {
-	payload, err := multipartUpload(ctx, client, p.endpoint, "file", archivePath, nil)
+func (p *uguuProvider) Upload(ctx context.Context, client *http.Client, archivePath string) (string, error) {
+	payload, err := multipartUpload(ctx, client, p.endpoint, "files[]", archivePath, nil)
 	if err != nil {
 		return "", err
 	}
 
 	var response struct {
 		Success bool   `json:"success"`
-		Link    string `json:"link"`
-		Message string `json:"message"`
-		Error   any    `json:"error"`
+		Error   string `json:"error"`
+		Files   []struct {
+			URL string `json:"url"`
+		} `json:"files"`
 	}
 	if err := json.Unmarshal(payload, &response); err != nil {
-		return "", fmt.Errorf("file.io devolvió JSON inválido: %w", err)
+		return "", fmt.Errorf("Uguu devolvió JSON inválido: %w", err)
 	}
-	if !response.Success || strings.TrimSpace(response.Link) == "" {
-		message := strings.TrimSpace(response.Message)
-		if message == "" && response.Error != nil {
-			message = fmt.Sprint(response.Error)
-		}
-		if message == "" {
-			message = "respuesta sin enlace"
-		}
-		return "", fmt.Errorf("file.io rechazó la subida: %s", message)
+	if len(response.Files) > 0 && strings.TrimSpace(response.Files[0].URL) != "" {
+		return response.Files[0].URL, nil
 	}
-	return response.Link, nil
+
+	message := strings.TrimSpace(response.Error)
+	if message == "" {
+		if response.Success {
+			message = "respuesta exitosa sin enlace directo"
+		} else {
+			message = "respuesta sin enlace directo"
+		}
+	}
+	return "", fmt.Errorf("Uguu rechazó la subida: %s", message)
 }
 
-type tmpFilesProvider struct {
+type transferSHProvider struct {
 	endpoint string
+	maxDays  string
 }
 
-func (p *tmpFilesProvider) Name() string {
-	return "tmpfiles.org"
+func (p *transferSHProvider) Name() string {
+	return "transfer.sh"
 }
 
-func (p *tmpFilesProvider) Upload(ctx context.Context, client *http.Client, archivePath string) (string, error) {
-	payload, err := multipartUpload(ctx, client, p.endpoint, "file", archivePath, map[string]string{"expire": "172800"})
+func (p *transferSHProvider) Upload(ctx context.Context, client *http.Client, archivePath string) (string, error) {
+	filename := filepath.Base(archivePath)
+	if strings.TrimSpace(filename) == "" || filename == "." || filename == string(filepath.Separator) {
+		return "", errors.New("no se pudo determinar el nombre del ZIP para transfer.sh")
+	}
+
+	uploadURL, err := joinUploadURL(p.endpoint, filename)
 	if err != nil {
 		return "", err
 	}
 
-	var response struct {
-		Status string `json:"status"`
-		Data   struct {
-			URL string `json:"url"`
-		} `json:"data"`
+	payload, err := putFile(ctx, client, uploadURL, archivePath, map[string]string{"Max-Days": p.maxDays})
+	if err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal(payload, &response); err != nil {
-		return "", fmt.Errorf("tmpfiles.org devolvió JSON inválido: %w", err)
+
+	shareURL, err := parsePlainURL(payload)
+	if err != nil {
+		return "", err
 	}
-	if response.Status != "success" || strings.TrimSpace(response.Data.URL) == "" {
-		return "", errors.New("tmpfiles.org no devolvió un enlace de descarga")
-	}
-	return response.Data.URL, nil
+	return transferDirectURL(shareURL)
 }
 
 func multipartUpload(ctx context.Context, client *http.Client, endpoint, fileField, archivePath string, fields map[string]string) ([]byte, error) {
@@ -247,7 +250,7 @@ func multipartUpload(ctx context.Context, client *http.Client, endpoint, fileFie
 		return nil, fmt.Errorf("no se pudo crear la solicitud HTTP: %w", err)
 	}
 	request.Header.Set("Content-Type", form.FormDataContentType())
-	request.Header.Set("User-Agent", "gitzip-upload/1.0")
+	request.Header.Set("User-Agent", "gitzip-upload/1.1")
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -279,6 +282,91 @@ func multipartUpload(ctx context.Context, client *http.Client, endpoint, fileFie
 		return nil, fmt.Errorf("el servidor respondió %s: %s", response.Status, body)
 	}
 	return payload, nil
+}
+
+func putFile(ctx context.Context, client *http.Client, endpoint, archivePath string, headers map[string]string) ([]byte, error) {
+	if strings.TrimSpace(endpoint) == "" {
+		return nil, errors.New("el endpoint PUT no puede estar vacío")
+	}
+
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("no se pudo abrir el ZIP para subirlo: %w", err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("no se pudo leer el tamaño del ZIP: %w", err)
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, file)
+	if err != nil {
+		return nil, fmt.Errorf("no se pudo crear la solicitud PUT: %w", err)
+	}
+	request.ContentLength = info.Size()
+	request.Header.Set("Content-Type", "application/zip")
+	request.Header.Set("User-Agent", "gitzip-upload/1.1")
+	for key, value := range headers {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
+			request.Header.Set(key, value)
+		}
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("falló la subida PUT: %w", err)
+	}
+	defer response.Body.Close()
+
+	payload, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
+	if readErr != nil {
+		return nil, fmt.Errorf("no se pudo leer la respuesta PUT: %w", readErr)
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		body := strings.TrimSpace(string(payload))
+		if body == "" {
+			body = response.Status
+		}
+		return nil, fmt.Errorf("el servidor respondió %s: %s", response.Status, body)
+	}
+	return payload, nil
+}
+
+func joinUploadURL(endpoint, filename string) (string, error) {
+	baseURL, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return "", fmt.Errorf("endpoint de subida inválido: %w", err)
+	}
+	if baseURL.Scheme != "http" && baseURL.Scheme != "https" {
+		return "", fmt.Errorf("endpoint de subida sin esquema HTTP válido: %q", endpoint)
+	}
+	if strings.TrimSpace(baseURL.Host) == "" {
+		return "", fmt.Errorf("endpoint de subida sin host: %q", endpoint)
+	}
+	baseURL.Path = path.Join(baseURL.Path, url.PathEscape(filename))
+	return baseURL.String(), nil
+}
+
+func transferDirectURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("transfer.sh devolvió una URL inválida: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("transfer.sh devolvió una URL sin esquema HTTP válido: %q", raw)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return "", fmt.Errorf("transfer.sh devolvió una URL sin host: %q", raw)
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		return "", fmt.Errorf("transfer.sh devolvió una URL sin ruta descargable: %q", raw)
+	}
+	if parsed.Path == "/get" || strings.HasPrefix(parsed.Path, "/get/") {
+		return parsed.String(), nil
+	}
+	parsed.Path = path.Join("/get", parsed.Path)
+	return parsed.String(), nil
 }
 
 func parsePlainURL(payload []byte) (string, error) {

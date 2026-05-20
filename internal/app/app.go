@@ -16,7 +16,7 @@ import (
 	"gitzip/internal/upload"
 )
 
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 // Run executes the gitzip CLI using the current working directory as project root.
 func Run(stdout, stderr io.Writer, args []string) error {
@@ -162,7 +162,7 @@ func uploadArchive(stdout io.Writer, archivePath, password string) error {
 
 	archiveName := filepath.Base(archivePath)
 	fmt.Fprintf(stdout, "Subida temporal completada con: %s\n", result.Provider)
-	fmt.Fprintf(stdout, "Enlace: %s\n", result.URL)
+	fmt.Fprintf(stdout, "Enlace directo: %s\n", result.URL)
 	fmt.Fprintf(stdout, "Contraseña ZIP: %s\n", password)
 	fmt.Fprintln(stdout, "Comando wget:")
 	fmt.Fprintf(stdout, "wget -O %s %s\n", shellQuote(archiveName), shellQuote(result.URL))
